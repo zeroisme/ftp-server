@@ -1,4 +1,4 @@
-use error::{Error, Result};
+use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::str::{self, FromStr};
 
