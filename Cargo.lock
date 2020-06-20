@@ -36,6 +36,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures",
+ "time",
  "tokio",
  "tokio-util",
 ]
@@ -402,6 +403,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
+]
+
+[[package]]
+name = "time"
+version = "0.1.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca8a50ef2360fbd1eeb0ecd46795a87a19024eb4b53c5dc916ca1fd95fe62438"
+dependencies = [
+ "libc",
+ "winapi 0.3.8",
 ]
 
 [[package]]

@@ -1,11 +1,11 @@
-use std::io;
 use std::error;
+use std::io;
 use std::result;
 use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 
-use std::fmt::{self, Display, Formatter};
 use self::Error::*;
+use std::fmt::{self, Display, Formatter};
 
 pub type Result<T> = result::Result<T, Error>;
 
@@ -47,7 +47,7 @@ impl From<io::Error> for Error {
     }
 }
 
-impl <'a> From<&'a str> for Error {
+impl<'a> From<&'a str> for Error {
     fn from(message: &'a str) -> Self {
         Msg(message.to_string())
     }

@@ -1,8 +1,8 @@
 use std::io;
 // use bytes::BytesMut;
-use bytes::BytesMut;
 use crate::cmd::Command;
 use crate::error::Error;
+use bytes::BytesMut;
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::ftp::Answer;
@@ -28,8 +28,7 @@ impl Decoder for FtpCodec {
 }
 
 fn find_crlf(buf: &mut BytesMut) -> Option<usize> {
-    buf.windows(2)
-        .position(|bytes| bytes == b"\r\n")
+    buf.windows(2).position(|bytes| bytes == b"\r\n")
 }
 
 impl Encoder<Answer> for FtpCodec {
@@ -43,6 +42,30 @@ impl Encoder<Answer> for FtpCodec {
         };
 
         buf.extend(answer.as_bytes());
+        Ok(())
+    }
+}
+
+pub struct BytesCodec;
+impl Decoder for BytesCodec {
+    type Item = Vec<u8>;
+    type Error = io::Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<Vec<u8>>> {
+        if buf.len() == 0 {
+            return Ok(None);
+        }
+        let data = buf.to_vec();
+        buf.clear();
+        Ok(Some(data))
+    }
+}
+
+impl Encoder<Vec<u8>> for BytesCodec {
+    type Error = io::Error;
+
+    fn encode(&mut self, data: Vec<u8>, buf: &mut BytesMut) -> io::Result<()> {
+        buf.extend(data);
         Ok(())
     }
 }
