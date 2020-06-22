@@ -6,6 +6,8 @@ mod ftp;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 
 use crate::cmd::{Command, TransferType};
 use crate::codec::FtpCodec;
@@ -14,7 +16,7 @@ use crate::ftp::{Answer, ResultCode};
 use futures::prelude::*;
 use futures::stream::SplitSink;
 use futures::stream::SplitStream;
-use futures::{Sink, Stream, StreamExt};
+use futures::{StreamExt};
 use tokio_util::codec::Framed;
 
 use std::env;
@@ -27,8 +29,6 @@ use std::result;
 use std::fs::create_dir;
 use std::fs::read_dir;
 use std::fs::remove_dir_all;
-use std::fs::File;
-use std::io::Read;
 use std::path::Component;
 
 fn invalid_path(path: &Path) -> bool {
@@ -43,7 +43,7 @@ fn invalid_path(path: &Path) -> bool {
 use crate::codec::BytesCodec;
 
 type DataReader = SplitStream<Framed<TcpStream, BytesCodec>>;
-type DataWriter = SplitSink<Framed<TcpStream, BytesCodec>, bytes::Bytes>;
+type DataWriter = SplitSink<Framed<TcpStream, BytesCodec>, Vec<u8>>;
 type Writer = SplitSink<Framed<TcpStream, FtpCodec>, Answer>;
 
 use std::ffi::OsString;
@@ -189,7 +189,7 @@ impl Client {
             return Ok(self);
         }
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
-        let listener = TcpListener::bind(addr).await?;
+        let mut listener = TcpListener::bind(addr).await?;
         let port = listener.local_addr()?.port();
         self = self
             .send(Answer::new(
@@ -199,12 +199,11 @@ impl Client {
             .await?;
         println!("Waiting clients on port {}...", port);
 
-        for (stream, _rest) in listener.incoming() {
-            let (writer, reader) = Framed(stream, BytesCodec).split();
-            self.data_writer = Some(writer);
-            self.data_reader = Some(reader);
-            break;
-        }
+        let (socket, _) = listener.accept().await?;
+        let (writer, reader) = Framed::new(socket, BytesCodec).split();
+        self.data_writer = Some(writer);
+        self.data_reader = Some(reader);
+
         Ok(self)
     }
 
@@ -266,7 +265,7 @@ impl Client {
                     "Closing connection...",
                 ))
                 .await?;
-            self.writer.close()?;
+            self.writer.close().await?;
         }
         Ok(self)
     }
@@ -395,8 +394,9 @@ impl Client {
     }
 
     async fn send_data(mut self, data: Vec<u8>) -> Result<Self> {
-        if let Some(writer) = self.data_writer {
+        if let Some(mut writer) = self.data_writer {
             writer.send(data).await?;
+            self.data_writer = Some(writer);
         }
         Ok(self)
     }
@@ -419,9 +419,9 @@ impl Client {
                             "Starting to send file...",
                         ))
                         .await?;
-                    let mut file = File::open(path)?;
+                    let mut file = File::open(path).await?;
                     let mut out = vec![];
-                    file.read_to_end(&mut out)?;
+                    file.read_to_end(&mut out).await?;
                     self = self.send_data(out).await?;
                     println!("-> file transfer done!");
                 } else {
@@ -484,8 +484,8 @@ impl Client {
                 .await?;
             let (data, new_self) = self.receive_data().await?;
             self = new_self;
-            let mut file = File::create(path)?;
-            file.write_all(&data);
+            let mut file = File::create(path).await?;
+            file.write_all(&data).await?;
             println!("-> file transfer done!");
             self.close_data_connection();
             self = self
@@ -511,13 +511,20 @@ impl Client {
             return Ok((vec![], self));
         }
 
-        let reader = self
+        let mut reader = self
             .data_reader
             .take()
             .ok_or_else(|| Error::Msg("No data reader".to_string()))?;
-        for data in reader {
-            file_data.extend(&data);
+
+        while let Some(data) = reader.next().await {
+            match data {
+                Ok(data) => file_data.extend(&data),
+                Err(e) => {
+                    eprintln!("get cmd error: {}", e);
+                }
+            }
         }
+    
         Ok((file_data, self))
     }
 }
@@ -525,37 +532,34 @@ impl Client {
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let server_root = env::current_dir()?;
-    server(handle, server_root).await?;
+    server(server_root).await?;
     Ok(())
 }
 
-async fn server(handle: Handle, server_root: PathBuf) -> io::Result<()> {
+async fn server(server_root: PathBuf) -> io::Result<()> {
     let addr = "127.0.0.1:1234";
     let mut listener = TcpListener::bind(addr).await?;
 
-    let server_root = env::current_dir()?;
-
     loop {
-        let (mut socket, addr) = listener.accept().await?;
+        let (socket, addr) = listener.accept().await?;
 
         let address = format!("[address: {}]", addr);
         println!("New client: {}", address);
-
-        tokio::spawn(async move { handle_client(socket, server_root).await });
+        let server_root_copy = server_root.clone();
+        tokio::spawn(async move { handle_client(socket, server_root_copy).await });
     }
 }
 
 async fn handle_client(
     stream: TcpStream,
-    handle: Handle,
     server_root: PathBuf,
 ) -> result::Result<(), ()> {
-    client(stream, handle, server_root)
+    client(stream,server_root)
         .await
         .map_err(|error| println!("Error handling client: {}", error))
 }
 
-async fn client(stream: TcpStream, handle: Handle, server_root: PathBuf) -> io::Result<()> {
+async fn client(stream: TcpStream, server_root: PathBuf) -> io::Result<()> {
     let framed = Framed::new(stream, FtpCodec);
     let (mut writer, mut reader) = framed.split();
     // let (writer, reader) = stream.framed(FtpCodec).split();
