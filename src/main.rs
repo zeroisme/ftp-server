@@ -611,9 +611,7 @@ fn add_file_info(path: PathBuf, out: &mut Vec<u8>) {
     };
 
     let file_str = format!(
-        "{is_dir}{rights} {links} {owner}
-{group} {size} {month}
- {day} {hour}:{min} {path}{extra}\r\n",
+        "{is_dir}{rights} {links} {owner} {group} {size} {month} {day} {hour}:{min} {path}{extra}\r\n",
         is_dir = is_dir,
         rights = rights,
         links = 1,           // number of links
