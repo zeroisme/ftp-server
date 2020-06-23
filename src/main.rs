@@ -2,6 +2,10 @@ mod cmd;
 mod codec;
 mod error;
 mod ftp;
+mod config;
+
+#[macro_use]
+extern crate serde_derive;
 
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -30,6 +34,11 @@ use std::fs::create_dir;
 use std::fs::read_dir;
 use std::fs::remove_dir_all;
 use std::path::Component;
+
+use crate::config::Config;
+use crate::config::DEFAULT_PORT;
+
+const CONFIG_FILE: &'static str = "config.toml";
 
 fn invalid_path(path: &Path) -> bool {
     for component in path.components() {
@@ -532,13 +541,16 @@ impl Client {
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let config = Config::new(CONFIG_FILE).expect("Error while lodding config...");
     let server_root = env::current_dir()?;
-    server(server_root).await?;
+    server(server_root, config).await?;
     Ok(())
 }
 
-async fn server(server_root: PathBuf) -> io::Result<()> {
-    let addr = "127.0.0.1:1234";
+async fn server(server_root: PathBuf, config: Config) -> io::Result<()> {
+    let port = config.server_port.unwrap_or(DEFAULT_PORT);
+    let addr = SocketAddr::new(IpAddr::V4(config.server_addr.as_ref().unwrap_or(&"127.0.0.1".to_owned()).parse().expect("Invalid Ipv4 address...")), port);
+    // let addr = "127.0.0.1:1234";
     let mut listener = TcpListener::bind(addr).await?;
 
     loop {
