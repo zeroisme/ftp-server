@@ -194,12 +194,13 @@ impl Client {
         self = self
             .send(Answer::new(
                 ResultCode::EnteringPassiveMode,
-                &format!("127.0.0.1,{},{}", port >> 8, port & 0xFF),
+                &format!("127,0,0,1,{},{}", port >> 8, port & 0xFF),
             ))
             .await?;
         println!("Waiting clients on port {}...", port);
 
-        let (socket, _) = listener.accept().await?;
+        let (socket, addr) = listener.accept().await?;
+        println!("Address: {}", addr);
         let (writer, reader) = Framed::new(socket, BytesCodec).split();
         self.data_writer = Some(writer);
         self.data_reader = Some(reader);
@@ -373,13 +374,6 @@ impl Client {
                     ))
                     .await?;
             }
-        } else {
-            self = self
-                .send(Answer::new(
-                    ResultCode::ConnectionClosed,
-                    "No opened data connection",
-                ))
-                .await?;
             if self.data_writer.is_some() {
                 self.close_data_connection();
                 self = self
@@ -389,6 +383,13 @@ impl Client {
                     ))
                     .await?;
             }
+        } else {
+            self = self
+                .send(Answer::new(
+                    ResultCode::ConnectionClosed,
+                    "No opened data connection",
+                ))
+                .await?;
         }
         Ok(self)
     }
