@@ -49,6 +49,12 @@ fn invalid_path(path: &Path) -> bool {
     false
 }
 
+fn prefix_slash(path: &mut PathBuf) {
+    if !path.is_absolute() {
+        *path = Path::new("/").join(&path);
+    }
+}
+
 use crate::codec::BytesCodec;
 
 type DataReader = SplitStream<Framed<TcpStream, BytesCodec>>;
@@ -85,26 +91,92 @@ struct Client {
     data_reader: Option<DataReader>,
     data_writer: Option<DataWriter>,
     cwd: PathBuf,
+    name: Option<String>,
     server_root: PathBuf,
     transfer_type: TransferType,
     writer: Writer,
+    is_admin: bool,
+    config: Config, 
+    waiting_password: bool,
 }
 
 impl Client {
-    fn new(writer: Writer, server_root: PathBuf) -> Client {
+    fn new(writer: Writer, server_root: PathBuf, config: Config) -> Client {
         Client {
             data_port: None,
             data_reader: None,
             data_writer: None,
             cwd: PathBuf::from("/"),
+            name: None,
             server_root,
             transfer_type: TransferType::Ascii,
             writer,
+            is_admin: false,
+            config,
+            waiting_password: false,
         }
     }
 
     async fn handle_cmd(mut self, cmd: Command) -> Result<Self> {
         println!("Received command: {:?}", cmd);
+
+        if self.is_logged() {
+            match cmd {
+                Command::Cwd(directory) => return Ok(self.cwd(directory).await?),
+                Command::List(path) => return Ok(self.list(path).await?),
+                Command::Pasv => return Ok(self.pasv().await?),
+                Command::Port(port) => {
+                    self.data_port = Some(port);
+                    return Ok(self.send(Answer::new(ResultCode::Ok, &format!("Data port is now {}", port))).await?);
+                },
+                Command::Pwd => {
+                    let msg = format!("{}", self.cwd.to_str().unwrap_or(""));
+                    if !msg.is_empty() {
+                        let message = format!("\"{}\" ", msg);
+                        return Ok(self.send(Answer::new(ResultCode::PATHNAMECreated, &message)).await?);
+                    } else {
+                        return Ok(self.send(Answer::new(ResultCode::FileNotFound, "No such file or directory")).await?);
+                    }
+                },
+                Command::Retr(file) => return Ok(self.retr(file).await?),
+                Command::Stor(file) => return Ok(self.stor(file).await?),
+                Command::CdUp => {
+                    if let Some(path) = self.cwd.parent().map(Path::to_path_buf) {
+                        self.cwd = path;
+                        prefix_slash(&mut self.cwd);
+                    }
+                    return Ok(self.send(Answer::new(ResultCode::Ok, "Done")).await?);
+                },
+                Command::Mkd(path) => return Ok(self.mkd(path).await?),
+                Command::Rmd(path) => return Ok(self.rmd(path).await?),
+                _ => (),
+            }
+        } else if self.name.is_some() && self.waiting_password {
+            if let Command::Pass(content) = cmd {
+                let mut ok = false;
+                if self.is_admin {
+                    ok = content == self.config.admin.as_ref().unwrap().password;
+                } else {
+                    for user in &self.config.users {
+                        if Some(&user.name) == self.name.as_ref() {
+                            if user.password == content {
+                                ok = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if ok {
+                    self.waiting_password = false;
+                    let name = self.name.clone().unwrap_or(String::new());
+                    self = self.send(Answer::new(ResultCode::UserLoggedIn, &format!("Welcome {}", name))).await?;
+                } else {
+                    self = self.send(Answer::new(ResultCode::NotLoggedIn, "Invalid password")).await?;
+                }
+
+                return Ok(self);
+            }
+        }
         match cmd {
             Command::User(content) => {
                 if content.is_empty() {
@@ -115,31 +187,43 @@ impl Client {
                         ))
                         .await?;
                 } else {
-                    self = self
-                        .send(Answer::new(
-                            ResultCode::UserLoggedIn,
-                            &format!("Welcome {}!", content),
-                        ))
-                        .await?;
+                    let mut name = None;
+                    let mut pass_required = true;
+
+                    self.is_admin = false;
+                    if let Some(ref admin) = self.config.admin {
+                        if admin.name == content {
+                            pass_required = admin.password.is_empty() == false;
+                            self.is_admin = true;
+                        }
+                    }
+
+                    // In case the user isn't the admin
+                    if name.is_none() {
+                        for user in &self.config.users {
+                            if user.name == content {
+                                name = Some(content.clone());
+                                pass_required = user.password.is_empty() == false;
+                                break;
+                            }
+                        }
+                    }
+                    // In case this is an unknown user.
+                    if name.is_none() {
+                        self = self.send(Answer::new(ResultCode::NotLoggedIn, "Unknown user...")).await?;
+                    } else {
+                        self.name = name.clone();
+                        if pass_required {
+                            self.waiting_password = true;
+                            self = self.send(Answer::new(ResultCode::UserNameOkayNeedPassword, &format!("Login Ok password needed for {}", name.unwrap()))).await?;
+                        } else {
+                            self.waiting_password = false;
+                            self = self.send(Answer::new(ResultCode::UserLoggedIn, &format!("Welcome {}!", content))).await?;
+                        }
+                    }
                 }
             }
-            Command::Pwd => {
-                let msg = format!("{}", self.cwd.to_str().unwrap_or(""));
-                if !msg.is_empty() {
-                    let message = format!("\"/{}\" ", msg);
-                    self = self
-                        .send(Answer::new(ResultCode::PATHNAMECreated, &message))
-                        .await?;
-                } else {
-                    self = self
-                        .send(Answer::new(
-                            ResultCode::FileNotFound,
-                            "No such file or directory",
-                        ))
-                        .await?;
-                }
-            }
-            Command::Cwd(directory) => self = self.cwd(directory).await?,
+            Command::NoOp => self = self.send(Answer::new(ResultCode::Ok, "Doing nothing")).await?,
             Command::Type(typ) => {
                 self.transfer_type = typ;
                 self = self
@@ -149,7 +233,9 @@ impl Client {
                     ))
                     .await?;
             }
-            Command::Pasv => self = self.pasv().await?,
+            Command::Syst => {
+                self = self.send(Answer::new(ResultCode::Ok, "I won't tell!")).await?;
+            }
             Command::Unknown(s) => {
                 self = self
                     .send(Answer::new(
@@ -159,16 +245,12 @@ impl Client {
                     .await?
             }
             Command::Quit => self = self.quit().await?,
-            Command::Mkd(path) => self = self.mkd(path).await?,
-            Command::Rmd(path) => self = self.rmd(path).await?,
-            Command::List(path) => self = self.list(path).await?,
-            Command::Retr(file) => self = self.retr(file).await?,
-            Command::Stor(file) => self = self.stor(file).await?,
             _ => {
+                // Not Logged in
                 self = self
                     .send(Answer::new(
-                        ResultCode::CommandNotImplemented,
-                        "Not implemented",
+                        ResultCode::NotLoggedIn,
+                        "Please log first",
                     ))
                     .await?
             }
@@ -228,7 +310,7 @@ impl Client {
                 self.cwd = prefix.to_path_buf();
                 self = self
                     .send(Answer::new(
-                        ResultCode::Ok,
+                        ResultCode::RequestedFileActionOkay,
                         &format!("Directory changed to \"{}\"", directory.display()),
                     ))
                     .await?;
@@ -358,7 +440,10 @@ impl Client {
                     if let Ok(dir) = read_dir(path) {
                         for entry in dir {
                             if let Ok(entry) = entry {
-                                add_file_info(entry.path(), &mut out);
+                                if self.is_admin || entry.path() != self.server_root.join(CONFIG_FILE) {
+                                    add_file_info(entry.path(), &mut out);
+                                }
+                                
                             }
                         }
                     } else {
@@ -371,7 +456,9 @@ impl Client {
                         return Ok(self);
                     }
                 } else {
-                    add_file_info(path, &mut out);
+                    if self.is_admin || path != self.server_root.join(CONFIG_FILE) {
+                        add_file_info(path, &mut out);
+                    }
                 }
                 self = self.send_data(out).await?;
                 println!("-> and done");
@@ -422,7 +509,7 @@ impl Client {
             let (new_self, res) = self.complete_path(path.clone());
             self = new_self;
             if let Ok(path) = res {
-                if path.is_file() {
+                if path.is_file() && (self.is_admin || path != self.server_root.join(CONFIG_FILE)) {
                     self = self
                         .send(Answer::new(
                             ResultCode::DataConnectionAlreadyOpen,
@@ -480,7 +567,7 @@ impl Client {
 
     async fn stor(mut self, path: PathBuf) -> Result<Self> {
         if self.data_reader.is_some() {
-            if invalid_path(&path) {
+            if invalid_path(&path) || (!self.is_admin && path == self.server_root.join(CONFIG_FILE)) {
                 let error: io::Error = io::ErrorKind::PermissionDenied.into();
                 return Err(error.into());
             }
@@ -537,6 +624,10 @@ impl Client {
     
         Ok((file_data, self))
     }
+
+    fn is_logged(&self) -> bool {
+        self.name.is_some() && !self.waiting_password
+    }
 }
 
 #[tokio::main]
@@ -559,20 +650,22 @@ async fn server(server_root: PathBuf, config: Config) -> io::Result<()> {
         let address = format!("[address: {}]", addr);
         println!("New client: {}", address);
         let server_root_copy = server_root.clone();
-        tokio::spawn(async move { handle_client(socket, server_root_copy).await });
+        let config_copy = config.clone();
+        tokio::spawn(async move { handle_client(socket, server_root_copy, config_copy).await });
     }
 }
 
 async fn handle_client(
     stream: TcpStream,
     server_root: PathBuf,
+    config: Config,
 ) -> result::Result<(), ()> {
-    client(stream,server_root)
+    client(stream, server_root, config)
         .await
         .map_err(|error| println!("Error handling client: {}", error))
 }
 
-async fn client(stream: TcpStream, server_root: PathBuf) -> io::Result<()> {
+async fn client(stream: TcpStream, server_root: PathBuf, config: Config) -> io::Result<()> {
     let framed = Framed::new(stream, FtpCodec);
     let (mut writer, mut reader) = framed.split();
     // let (writer, reader) = stream.framed(FtpCodec).split();
@@ -582,7 +675,7 @@ async fn client(stream: TcpStream, server_root: PathBuf) -> io::Result<()> {
             "Welcome to this FTP server!",
         ))
         .await?;
-    let mut client = Client::new(writer, server_root);
+    let mut client = Client::new(writer, server_root, config);
 
     while let Some(cmd) = reader.next().await {
         client = match cmd {

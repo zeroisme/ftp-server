@@ -1,5 +1,4 @@
 use std::io;
-// use bytes::BytesMut;
 use crate::cmd::Command;
 use crate::error::Error;
 use bytes::BytesMut;
@@ -67,5 +66,55 @@ impl Encoder<Vec<u8>> for BytesCodec {
     fn encode(&mut self, data: Vec<u8>, buf: &mut BytesMut) -> io::Result<()> {
         buf.extend(data);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::ftp::ResultCode;
+    use super::{Answer, BytesMut, Command, Decoder, Encoder, FtpCodec};
+
+    #[test]
+    fn test_encoder() {
+        let mut codec = FtpCodec;
+        let message = "bad sequence of commands";
+        let answer = Answer::new(ResultCode::BadSequenceOfCommands, message);
+
+        let mut buf = BytesMut::new();
+        let result = codec.encode(answer, &mut buf);
+        assert!(result.is_ok());
+        assert_eq!(buf, format!("503 {}\r\n", message));
+
+        let answer = Answer::new(ResultCode::CantOpenDataConnection, "");
+        let mut buf = BytesMut::new();
+        let result = codec.encode(answer, &mut buf);
+        assert!(result.is_ok(), "Result is ok");
+        assert_eq!(buf, format!("425\r\n"), "Buffer contains 425");
+    }
+
+    #[test]
+    fn test_decoder() {
+        let mut codec = FtpCodec;
+        let mut buf = BytesMut::new();
+        buf.extend(b"PWD");
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        let command = result.unwrap();
+        assert!(command.is_none());
+
+        buf.extend(b"\r\n");
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        let command = result.unwrap();
+        assert_eq!(command, Some(Command::Pwd));
+
+        let mut buf = BytesMut::new();
+        buf.extend(b"LIST /tmp\r\n");
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        let command = result.unwrap();
+        assert_eq!(command, Some(Command::List(Some(PathBuf::from("/tmp")))));
     }
 }

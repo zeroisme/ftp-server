@@ -2,12 +2,13 @@ use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::str::{self, FromStr};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Auth,
     Cwd(PathBuf),
     List(Option<PathBuf>),
     Mkd(PathBuf),
+    Pass(String),
     NoOp,
     Port(u16),
     Pasv,
@@ -42,6 +43,7 @@ impl AsRef<str> for Command {
             Command::Mkd(_) => "MKD",
             Command::Rmd(_) => "RMD",
             Command::NoOp => "NOOP",
+            Command::Pass(_) => "PASS",
             Command::Unknown(_) => "UNKN", // doesn't exist
         }
     }
@@ -101,13 +103,21 @@ impl Command {
                 data.and_then(|bytes| Ok(Path::new(str::from_utf8(bytes)?).to_path_buf()))?,
             ),
             b"SYST" => Command::Syst,
-            b"TYPE" => match TransferType::from(data?[0]) {
-                TransferType::Unknown => {
-                    return Err("command not implemented
-for that parameter"
-                        .into())
+            b"TYPE" =>  {
+                let error = Err("command not implemented for that parameter".into());
+                let data = data?;
+                if data.is_empty() {
+                    return error;
                 }
-                typ => Command::Type(typ),
+
+                match TransferType::from(data[0]) {
+                    TransferType::Unknown => {
+                        return Err("command not implemented
+    for that parameter"
+                            .into())
+                    }
+                    typ => Command::Type(typ),
+                }
             },
             b"CDUP" => Command::CdUp,
             b"MKD" => Command::Mkd(
@@ -120,6 +130,7 @@ for that parameter"
                 data.and_then(|bytes| String::from_utf8(bytes.to_vec()).map_err(Into::into))?,
             ),
             b"NOOP" => Command::NoOp,
+            b"PASS" => Command::Pass(data.and_then(|bytes| String::from_utf8(bytes.to_vec()).map_err(Into::into))?),
             s => Command::Unknown(str::from_utf8(s).unwrap_or("").to_owned()),
         };
         Ok(command)
@@ -134,7 +145,7 @@ fn to_uppercase(data: &mut [u8]) {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TransferType {
     Ascii,
     Image,
